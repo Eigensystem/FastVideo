@@ -443,8 +443,12 @@ class GPUSlot:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self.process.start)
 
-        # Send init command and wait for response
-        init_response = await self._send_command(Command(CommandType.INIT), timeout=600.0)
+        # Send init command and wait for response. Default 600s is fine when
+        # the HF cache is already populated; first-run downloads on Windows
+        # (where hf_xet symlink-based accel is opt-in) can take 30-90 min, so
+        # let users override via DREAMVERSE_INIT_TIMEOUT_S.
+        _init_timeout = float(os.environ.get("DREAMVERSE_INIT_TIMEOUT_S", "600"))
+        init_response = await self._send_command(Command(CommandType.INIT), timeout=_init_timeout)
         if not isinstance(init_response, InitAck) or not init_response.success:
             error_msg = (init_response.error if isinstance(init_response, InitAck) else
                          f"unexpected init response: {type(init_response).__name__}")

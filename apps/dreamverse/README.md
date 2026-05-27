@@ -163,6 +163,69 @@ BACKEND_HOST=localhost BACKEND_PORT=8009 npm run dev
 
 Open `http://localhost:5299`.
 
+## Quick Start: Windows (Native or WSL2)
+
+Native Windows is supported but requires a few portability patches that have
+been merged into the codebase (`fcntl` import guard in `av_streaming.py`,
+NCCL→gloo backend switch in `parallel_state.py`). The install pipeline is
+captured in `apps/dreamverse/setup.bat`:
+
+```cmd
+apps\dreamverse\setup.bat                 :: base install (no FP4)
+apps\dreamverse\setup.bat --with-fp4      :: also install flashinfer (NVFP4)
+apps\dreamverse\run.bat                   :: launch backend + frontend
+apps\dreamverse\run.bat --mock            :: mock backend (no GPU)
+```
+
+To validate the install without launching the full backend:
+
+```cmd
+.venv\Scripts\python.exe apps\dreamverse\scripts\smoke_backend.py
+```
+
+This runs four phases (imports, distributed init, CLI, mock /healthz) in
+about 60 seconds and surfaces Windows-specific regressions early. Add
+`--with-readyz` to also poll the real `/readyz` after launching the full
+server (heavy; needs a warm model cache).
+
+### Windows caveats
+
+- **NVFP4 models** (e.g. `FastVideo/LTX2-Distilled-Diffusers`) require the
+  optional `flashinfer-python` package. flashinfer's build backend uses
+  `os.symlink`, which on Windows requires either admin or Developer Mode
+  (Settings → Privacy & Security → For developers → Developer Mode). Without
+  flashinfer, NVFP4 model loads fail with
+  `ImportError: NVFP4 quantization requires flashinfer`.
+- **FA4 attention** (`flash-attn-cute`) is split out into the
+  `[dreamverse-fa4]` extra. It is also a git-source build and needs the CUDA
+  toolchain + matched compute capability. The codebase falls back to FA3 →
+  FA2 → Torch SDPA when FA4 is unavailable, so omitting it is safe.
+- **NCCL** is not available in PyTorch's Windows wheels; the codebase falls
+  back to the gloo collective backend at `sp_size = tp_size = 1`.
+- **First-launch model download** can exceed the default 600s INIT timeout
+  on slow connections. Override with:
+  ```cmd
+  set DREAMVERSE_INIT_TIMEOUT_S=3600
+  apps\dreamverse\run.bat
+  ```
+
+### WSL2 as an alternative
+
+If you want to skip the Windows-specific install path entirely, WSL2 with
+GPU passthrough gives you a real Linux environment and the standard
+Method-1/2/3 install steps above work unchanged. NCCL and flashinfer
+install cleanly (no Developer-Mode requirement), and FA4 builds the same
+way as on bare-metal Linux. Use WSL2 when:
+
+- You need NCCL multi-GPU (FastVideo's sequence parallelism uses NCCL collectives).
+- You're hitting flashinfer's symlink permission errors and don't want to
+  enable Developer Mode.
+- You're building flash-attn from source and want a Linux toolchain.
+
+Inside WSL2 the working directory should be a Linux path (`/home/<user>/...`
+or `/mnt/wsl/...`) — running off `/mnt/c/` works but is significantly slower
+due to 9P filesystem overhead during HF cache writes.
+
 ## Quick Start: Mock Backend (For UI development)
 
 The mock server emulates the Dreamverse backend protocol and streams a

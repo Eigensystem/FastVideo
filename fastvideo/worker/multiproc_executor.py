@@ -11,6 +11,15 @@ import logging
 import logging.handlers
 import multiprocessing as mp
 from multiprocessing.connection import Connection
+# `_ConnectionBase` is the abstract parent of both POSIX `Connection` (fd-based)
+# and Windows `PipeConnection` (HANDLE-based).  Use it for the isinstance check
+# in wait_for_ready so the assertion accepts Windows pipes; without this, on
+# Windows the strict `isinstance(item, Connection)` is False because
+# PipeConnection does NOT inherit from Connection.
+try:
+    from multiprocessing.connection import _ConnectionBase
+except ImportError:
+    _ConnectionBase = Connection  # fallback: older Pythons or non-standard runtime
 from multiprocessing.queues import Queue
 import os
 import queue
@@ -604,7 +613,12 @@ class WorkerMultiprocProc:
         while pipes:
             ready = mp.connection.wait(pipes.keys())
             for pipe in ready:
-                assert isinstance(pipe, Connection)
+                # _ConnectionBase covers both POSIX Connection and Windows
+                # PipeConnection.  The original upstream assert used the
+                # narrower `Connection` class which is False on Windows.
+                assert isinstance(pipe, _ConnectionBase), (
+                    f"wait_for_ready: unexpected item type {type(pipe).__name__} "
+                    f"from mp.connection.wait")
                 try:
                     # Wait until the WorkerProc is ready.
                     unready_proc_handle = pipes.pop(pipe)

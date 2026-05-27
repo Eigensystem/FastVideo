@@ -57,7 +57,7 @@ dependencies = [
     "flask_restful",
     "aiohttp",
     "aiofiles",
-    "huggingface_hub",
+    "huggingface_hub[hf_xet]",
     "cloudpickle",
     "omegaconf",
 
@@ -68,6 +68,11 @@ dependencies = [
 
     # Kernel & Packaging
     # "fastvideo-kernel==0.2.6",  # Windows: depends on triton which has no win_amd64 wheels; install from C:\workspace\world\FastVideo\fastvideo-kernel\ if needed.
+    # On Windows we substitute triton-windows for the missing upstream triton
+    # wheels.  It registers an `import triton` shim with native win_amd64
+    # kernels so sageattention / torch.compile inductor / flop_counter / any
+    # path that probes triton stops emitting "triton not found" warnings.
+    "triton-windows; sys_platform == 'win32'",
     "wheel",
 
     # Training Dependencies

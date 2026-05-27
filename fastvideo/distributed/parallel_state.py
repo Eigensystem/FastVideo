@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model parallelism,
 import contextlib
 import os
 import pickle
+import sys
 import weakref
 from collections import namedtuple
 from collections.abc import Callable
@@ -731,7 +732,16 @@ def init_distributed_environment(
     from fastvideo.platforms import current_platform
     backend = "nccl"
     if current_platform.is_cuda_alike():
-        logger.info("Using nccl backend for CUDA platform")
+        # NCCL is Linux-only. PyTorch's Windows CUDA wheels ship without NCCL,
+        # so init_process_group(backend='nccl') raises "Distributed package
+        # doesn't have NCCL built in" on Windows even at world_size=1. Fall
+        # back to gloo, which supports CUDA tensors on Windows (with a small
+        # collective-perf penalty that's irrelevant at sp_size/tp_size=1).
+        if sys.platform == "win32":
+            backend = "gloo"
+            logger.info("Using gloo backend for CUDA on Windows (NCCL unavailable)")
+        else:
+            logger.info("Using nccl backend for CUDA platform")
     elif current_platform.is_npu():
         backend = "hccl"
         logger.info("Using hccl backend for NPU platform")

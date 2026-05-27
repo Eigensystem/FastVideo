@@ -38,6 +38,13 @@ if not defined BE_PORT set BE_PORT=8009
 set FE_PORT=5299
 if not defined FRONTEND_MODE set FRONTEND_MODE=devtools
 
+:: NVFP4 quantization needs flashinfer, which has no Windows wheel (the sdist
+:: build calls os.symlink, which Windows blocks without Developer Mode, and
+:: the underlying CUDA/cutlass code is Linux-focused anyway). Default to
+:: skipping NVFP4 so the bf16 fallback loads; set DREAMVERSE_DISABLE_NVFP4=0
+:: before launching if you actually have flashinfer working.
+if not defined DREAMVERSE_DISABLE_NVFP4 set "DREAMVERSE_DISABLE_NVFP4=1"
+
 set "REPO_ROOT=C:\workspace\world\FastVideo"
 set "VENV=%REPO_ROOT%\.venv"
 set "WEB=%~dp0web"
@@ -89,6 +96,7 @@ echo Dreamverse demo
 echo ============================================================
 echo   backend     : !BE_EXE! --port %BE_PORT%
 echo   backend URL : http://localhost:%BE_PORT%
+echo   NVFP4       : DREAMVERSE_DISABLE_NVFP4=%DREAMVERSE_DISABLE_NVFP4%  ^(1=skip ^(bf16 fallback^), 0=use NVFP4^)
 if "%NO_FRONTEND%"=="0" (
     echo   frontend    : npm run %FE_NPM% ^(mode=%FRONTEND_MODE%^)
     echo   frontend URL: http://localhost:%FE_PORT%

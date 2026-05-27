@@ -55,7 +55,20 @@ def _maybe_convert_model_to_nvfp4(model: nn.Module) -> None:
         if isinstance(getattr(mod, "quant_method", None),
                       NVFP4QuantizeMethod):
             logger.info("Converting loaded model weights for NVFP4 linear layers")
-            convert_model_to_nvfp4(model)
+            try:
+                convert_model_to_nvfp4(model)
+            except ImportError as e:
+                # flashinfer is required for NVFP4 conversion and ships only
+                # an sdist on PyPI (no Windows wheel, source build needs Linux
+                # CUDA toolchain).  When it's missing, skip the conversion so
+                # the model at least *loads* in its bf16-loaded form.  Forward
+                # passes through NVFP4QuantizeMethod layers will still fail
+                # downstream — caller is expected to either install flashinfer
+                # or use a non-NVFP4 model variant.
+                logger.warning(
+                    "Skipping NVFP4 weight conversion: %s. Model is loaded in "
+                    "bf16; inference through NVFP4 layers will fail unless "
+                    "flashinfer is available or the variant is swapped.", e)
             return
 
 

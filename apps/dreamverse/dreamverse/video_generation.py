@@ -257,6 +257,11 @@ class VideoGenerationWorker:
                              or self.current_model_config["model_path"])
 
         enable_compile = os.getenv("ENABLE_TORCH_COMPILE", "1") == "1"
+        # NVFP4 quantization needs flashinfer, which has no Windows wheels.
+        # Set DREAMVERSE_DISABLE_NVFP4=1 to load the model in bf16 instead —
+        # higher VRAM and slower, but works on hosts without flashinfer.
+        disable_nvfp4 = os.getenv("DREAMVERSE_DISABLE_NVFP4", "0") == "1"
+        quant_config = None if disable_nvfp4 else QuantizationConfig(transformer_quant="NVFP4")
 
         components = ComponentConfig(
             config_root=config_model_path,
@@ -286,7 +291,7 @@ class VideoGenerationWorker:
                     dynamic=False,
                 ),
                 use_fsdp_inference=False,
-                quantization=QuantizationConfig(transformer_quant="NVFP4"),
+                quantization=quant_config,
             ),
             pipeline=PipelineSelection(
                 components=components,

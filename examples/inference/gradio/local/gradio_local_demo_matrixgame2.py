@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import os
+import sys
+import threading
 import time
 
 import gradio as gr
@@ -11,6 +13,99 @@ from fastapi.responses import HTMLResponse, FileResponse
 
 from fastvideo.entrypoints.streaming_generator import StreamingVideoGenerator
 from fastvideo.models.dits.matrixgame2.utils import expand_action_to_frames
+
+# --- Handle-leak instrumentation ----------------------------------------------
+# This demo has historically leaked Windows kernel handles up to the per-process
+# ~16.7M cap, which manifests *system-wide* as `RuntimeError: can't allocate
+# lock` / `cannot join thread before it is started` in unrelated processes (any
+# subprocess.run that tries to spawn reader threads).  These helpers surface the
+# growth in real time so we can diagnose which step is responsible.
+try:
+    import psutil
+    _PROC = psutil.Process(os.getpid())
+except Exception:  # psutil missing — degrade gracefully, the demo still runs
+    psutil = None
+    _PROC = None
+
+# Sidecar log: every health snapshot is appended here AND printed to stderr.
+# This survives even if the controlling terminal is closed, scrollback
+# overflows, or stderr buffering swallows boot-time lines. Default location
+# is next to the script (writable, easy to grep). Override via env.
+_HEALTH_LOG_PATH = os.environ.get(
+    "FASTVIDEO_HEALTH_LOG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "health.log"),
+)
+_HEALTH_LOG_LOCK = threading.Lock()
+try:
+    # Truncate on each fresh process boot so we always see the boot snapshot
+    # at line 1. line-buffered so partial lines flush.
+    _HEALTH_LOG_FH = open(_HEALTH_LOG_PATH, "w", buffering=1, encoding="utf-8")
+    _HEALTH_LOG_FH.write(f"# health log opened {time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()}\n")
+except OSError:
+    _HEALTH_LOG_FH = None
+
+
+def _health_snapshot(label: str) -> str:
+    """Compact one-line snapshot of process + system resource usage.
+
+    Includes per-process handle count (the metric we care about most on
+    Windows), thread count, RSS, and CUDA mem if torch is initialized.
+
+    Side effect: also appends the line to the sidecar health log file so
+    the boot/post-model-load snapshots are preserved even if the terminal
+    is closed or scrollback overflows.
+    """
+    parts = [f"[{time.strftime('%H:%M:%S')}] [health/{label}]"]
+    if _PROC is not None:
+        try:
+            with _PROC.oneshot():
+                parts.append(f"handles={_PROC.num_handles():,}")
+                parts.append(f"threads={_PROC.num_threads()}")
+                rss_gb = _PROC.memory_info().rss / (1024**3)
+                parts.append(f"rss={rss_gb:.2f}GB")
+        except Exception as e:
+            parts.append(f"psutil_err={type(e).__name__}")
+    parts.append(f"py_threads={threading.active_count()}")
+    # asyncio.all_tasks() requires a running loop; outside of one, just say so.
+    try:
+        parts.append(f"asyncio_tasks={len(asyncio.all_tasks())}")
+    except RuntimeError:
+        parts.append("asyncio_tasks=-")
+    if torch.cuda.is_available():
+        try:
+            free, total = torch.cuda.mem_get_info()
+            parts.append(f"cuda_used={((total-free)/1024**3):.1f}GB/{(total/1024**3):.1f}GB")
+        except Exception:
+            pass
+    line = " ".join(parts)
+    # Persist to sidecar log so boot snapshots survive terminal close / scrollback.
+    if _HEALTH_LOG_FH is not None:
+        try:
+            with _HEALTH_LOG_LOCK:
+                _HEALTH_LOG_FH.write(line + "\n")
+        except Exception:
+            pass
+    return line
+
+
+def _start_health_monitor(interval_s: float = 10.0) -> None:
+    """Start a daemon thread that logs a health snapshot every `interval_s`.
+
+    Daemon thread so it dies with the process. Uses sys.stderr (not the gradio
+    logger) so the output survives even if gradio's stdout capturing
+    misbehaves under handle pressure.
+    """
+    def _loop():
+        while True:
+            try:
+                sys.stderr.write(_health_snapshot("periodic") + "\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+            time.sleep(interval_s)
+
+    t = threading.Thread(target=_loop, name="HealthMonitor", daemon=True)
+    t.start()
 
 
 VARIANT_CONFIG = {
@@ -503,13 +598,17 @@ def create_gradio_interface(generators: dict[str, StreamingVideoGenerator], load
             
             # run step async
             # inference_start_time = time.time()
+            sys.stderr.write(_health_snapshot(f"step-pre block={state.get('block_idx', '?')}") + "\n")
+            sys.stderr.flush()
             frames, block_future = await generator.step_async(keyboard_cond, mouse_cond)
             # inference_time = time.time() - inference_start_time
-            
+
             # wait for block file to be written
             block_path = await asyncio.to_thread(block_future.result) if block_future else None
             state["block_idx"] = generator.block_idx
             block_str = f"Block: {state['block_idx']} / {state['max_blocks']}"
+            sys.stderr.write(_health_snapshot(f"step-post block={state['block_idx']}") + "\n")
+            sys.stderr.flush()
             
             # total_time = time.time() - total_start_time
             
@@ -564,12 +663,20 @@ def main():
                         help="Model variant to load")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--health-interval", type=float, default=10.0,
+                        help="Seconds between periodic resource snapshots (handles/threads/RAM/VRAM). "
+                             "Set to 0 to disable.")
     args = parser.parse_args()
-    
+
+    sys.stderr.write(_health_snapshot("boot") + "\n")
+    sys.stderr.flush()
+    if args.health_interval > 0:
+        _start_health_monitor(interval_s=args.health_interval)
+
     # Load the selected model
     config = VARIANT_CONFIG[args.model]
     model_path = config["model_path"]
-    
+
     print(f"Loading model: {model_path}")
     setup_model_environment(model_path)
     generator = StreamingVideoGenerator.from_pretrained(
@@ -583,9 +690,27 @@ def main():
     )
     
     generators = {model_path: generator}
-    
+
+    sys.stderr.write(_health_snapshot("post-model-load") + "\n")
+    sys.stderr.flush()
+
     demo = create_gradio_interface(generators, args.model)
-    
+
+    # Windows handle-leak mitigation: cap gradio's queue to serial requests.
+    # Each concurrent request spawns anyio worker threads that don't release
+    # Win32 IO completion port handles on Python 3.12 + Windows. Forcing
+    # default_concurrency_limit=1 means only one request lives at a time, so
+    # the per-process handle budget is bounded by request count, not by
+    # in-flight × workers. Bigger workloads still ramp, just linearly.
+    try:
+        demo.queue(default_concurrency_limit=1, max_size=10)
+    except Exception as _e:
+        sys.stderr.write(f"[handle-leak-fix] demo.queue() failed: {_e}\n")
+        sys.stderr.flush()
+
+    sys.stderr.write(_health_snapshot("post-gradio-build") + "\n")
+    sys.stderr.flush()
+
     print(f"Starting Gradio at http://{args.host}:{args.port}")
     
     # FastAPI Wrapper
@@ -677,7 +802,20 @@ def main():
         allowed_paths=[os.path.abspath("outputs"), os.path.abspath("fastvideo-logos")]
     )
     
-    uvicorn.run(app, host=args.host, port=args.port)
+    # `loop="asyncio"` forces uvicorn's default asyncio event loop instead of
+    # uvloop (Linux-only anyway) or auto-detection that on Windows can pull in
+    # ProactorEventLoop, which interacts badly with anyio's BlockingPortal
+    # threads and amplifies the handle leak. `lifespan="off"` skips the FastAPI
+    # startup/shutdown hooks gradio doesn't need, so there's no async cleanup
+    # path that calls into anyio at exit.
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        loop="asyncio",
+        lifespan="off",
+        timeout_graceful_shutdown=2,
+    )
 
 
 if __name__ == "__main__":

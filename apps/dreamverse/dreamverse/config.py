@@ -74,9 +74,14 @@ MODEL_CONFIG = MODEL_REGISTRY[DEFAULT_MODEL_ID]
 SESSION_TIMEOUT_SECONDS = 300
 
 # Frame settings
-NUM_FRAMES = 121
-FRAME_HEIGHT = 1088
-FRAME_WIDTH = 1920
+# Lowered from 121 / 1088x1920 to ease warmup wall-time on 32 GB cards
+# (RTX 5090). LTX-2 *refinement* stage requires H and W divisible by 64
+# (NOT 32) -- ltx2_refine.py:88 enforces this. 544x960 was rejected; 576x1024
+# = 9*64 x 16*64 keeps the 1.78:1 aspect and is ~28% of default pixel area.
+# 49 frames = 13 latent frames (vs 31 at 121), cutting AR work by ~58%.
+NUM_FRAMES = 49
+FRAME_HEIGHT = 576
+FRAME_WIDTH = 1024
 NUM_INFERENCE_STEPS = 5
 JPEG_QUALITY = 100
 BATCH_SIZE = 3

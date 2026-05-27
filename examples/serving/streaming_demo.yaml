@@ -5,7 +5,11 @@
 # flashinfer / NVFP4 can comment out `engine.quantization` to fall back to bf16.
 
 generator:
-  model_path: FastVideo/LTX2-Distilled-Diffusers
+  # Switched from LTX2-Distilled (19B, T2V-only, needs CPU offload on <40GB GPUs)
+  # to FastWan2.2-TI2V-5B which fits in 31.8 GB bf16 with no offload and supports
+  # image-to-video conditioning. Trade-off: 50 steps instead of LTX2's distilled
+  # 5, and lower native resolution (480x832 vs 1088x1920).
+  model_path: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
 
   engine:
     num_gpus: 1
@@ -22,20 +26,18 @@ generator:
       fullgraph: true
       mode: max-autotune-no-cudagraphs
       dynamic: false
-    quantization:
-      transformer_quant: NVFP4
+    # NVFP4 commented out: still needs flashinfer which has no Windows wheel.
+    # Re-enable on Linux/WSL once flashinfer is installed in the venv.
+    # quantization:
+    #   transformer_quant: NVFP4
 
   pipeline:
-    workload_type: t2v
+    workload_type: i2v
     vae_tiling: false
     components:
-      config_root: FastVideo/LTX2-Distilled-Diffusers
-    preset_overrides:
-      refine:
-        enabled: true
-        num_inference_steps: 2
-        guidance_scale: 1.0
-        add_noise: true
+      config_root: FastVideo/FastWan2.2-TI2V-5B-FullAttn-Diffusers
+    # LTX2-specific `refine` preset removed -- it's an LTX2 second-pass refiner
+    # that doesn't apply to WAN. Re-add when switching back to LTX2.
 
 server:
   host: 0.0.0.0
@@ -44,18 +46,22 @@ server:
 
 default_request:
   sampling:
-    num_frames: 121
-    height: 1088
-    width: 1920
-    num_inference_steps: 5
-    fps: 24
+    # WAN 2.2 TI2V-5B native shape (LTX2 was 121 / 1088x1920 / 5 distilled steps).
+    num_frames: 81
+    height: 480
+    width: 832
+    num_inference_steps: 50
+    fps: 16
 
 streaming:
   session_timeout_seconds: 300
   generation_segment_cap: 6
   stream_mode: av_fmp4
   warmup:
-    enabled: true
+    # Warmup disabled: i2v warmup requires a real input image as well as the
+    # prompt. Re-enable and add an `image_path:` line once you have a seed
+    # image you want to anchor the warmup pass to.
+    enabled: false
     prompt: "A cinematic drone shot over coastal cliffs at sunrise, golden light, gentle ocean waves, ultra detailed"
     timeout_seconds: 2400
   pool:

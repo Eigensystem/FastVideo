@@ -315,8 +315,15 @@ class VideoGenerationWorker:
                 components=components,
                 vae_tiling=False,
                 preset_overrides={
+                    # refine=False: LTX2RefineLoRAStage segfaults inside
+                    # LoraLayer.__init__ on Windows + sm_120 + bf16 + flash-attn
+                    # 2.8.3 + torch 2.10 (Windows fatal exception: access
+                    # violation at linear.py:34 during set_lora_adapter()).
+                    # Stage 1 alone produces softer output but is stable;
+                    # also cuts wall time by ~40% (skips the stage 2
+                    # denoise+upsample pass).
                     "refine": {
-                        "enabled": True,
+                        "enabled": False,
                         "num_inference_steps": 2,
                         "guidance_scale": 1.0,
                         "add_noise": True,

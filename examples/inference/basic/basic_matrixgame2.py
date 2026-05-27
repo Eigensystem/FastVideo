@@ -43,6 +43,12 @@ def main():
         # FastVideo will automatically handle distributed setup
         num_gpus=1,
         use_fsdp_inference=False, # set to True if GPU is out of memory
+        # Layerwise offload pins every parameter to CPU memory individually
+        # via .pin_memory(). On Windows + sm_120, doing this for 1.6B params
+        # eventually trips CUDA's pinned-allocator bookkeeping and crashes
+        # the worker with "CUDA error: unknown error" (~8 min into init).
+        # Force it off and use plain cpu_offload instead.
+        dit_layerwise_offload=False,
         dit_cpu_offload=True, # DiT need to be offloaded for MoE
         vae_cpu_offload=False,
         text_encoder_cpu_offload=True,

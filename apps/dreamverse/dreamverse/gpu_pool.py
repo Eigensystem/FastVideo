@@ -161,6 +161,76 @@ def gpu_worker_process(
     os.environ["CUDA_VISIBLE_DEVICES"] = cuda_device
     os.environ["FASTVIDEO_ATTENTION_BACKEND"] = "FLASH_ATTN"
 
+    # Windows: dreamverse worker -> fastvideo multiproc_executor worker is
+    # nested multiprocessing. Each level creates Queue feeder threads + locks.
+    # Default thread-pool sizes (OMP=N_cores, tokenizers parallelism, torch
+    # threads) compound into >10k kernel objects, exhausting the per-process
+    # mutex allocator and crashing with:
+    #     RuntimeError: can't allocate lock
+    #     ValueError: semaphore or lock released too many times
+    # mid-checkpoint-load. Cap every thread-pool we know about to 1; the
+    # work is GPU-bound so CPU concurrency wins us nothing.
+    if sys.platform == "win32":
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["MKL_NUM_THREADS"] = "1"
+        os.environ["OPENBLAS_NUM_THREADS"] = "1"
+        os.environ["NUMEXPR_NUM_THREADS"] = "1"
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        # Also cap torch threading inside the worker.
+        try:
+            import torch
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
+
+    # Tee stdout+stderr to a per-GPU log file so worker exceptions survive
+    # the parent's subprocess pipe dying. On Windows + py3.12 + spawn, the
+    # parent's `_readerthread` (subprocess.py:1599) routinely raises
+    # `ValueError: I/O operation on closed file.` mid-startup, which loses
+    # any buffered worker output — including the `[GPU 0] Init error: ...`
+    # print + traceback that gpu_pool.py:328 emits when worker.initialize()
+    # raises. Without this tee the parent terminal shows nothing useful;
+    # with it, the full traceback lands in <repo>/apps/dreamverse/outputs/
+    # gpu_<id>_worker.log regardless of pipe state.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _log_dir = _Path(__file__).resolve().parent.parent / "outputs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_path = _log_dir / f"gpu_{gpu_id}_worker.log"
+    _log_file = open(_log_path, "w", buffering=1, encoding="utf-8", errors="replace")
+    _log_file.write(f"# gpu_worker_process pid={os.getpid()} gpu_id={gpu_id} cuda_device={cuda_device}\n")
+    _log_file.flush()
+
+    class _TeeStream:
+        """Write to underlying stream AND log file. Best-effort: never raise."""
+        def __init__(self, primary, secondary):
+            self._primary = primary
+            self._secondary = secondary
+        def write(self, s):
+            try:
+                self._primary.write(s)
+            except Exception:
+                pass  # parent pipe may be dead; keep going
+            try:
+                self._secondary.write(s)
+                self._secondary.flush()
+            except Exception:
+                pass
+            return len(s) if s else 0
+        def flush(self):
+            for stream in (self._primary, self._secondary):
+                try:
+                    stream.flush()
+                except Exception:
+                    pass
+        def __getattr__(self, name):
+            return getattr(self._primary, name)
+
+    _sys.stdout = _TeeStream(_sys.stdout, _log_file)
+    _sys.stderr = _TeeStream(_sys.stderr, _log_file)
+    print(f"[GPU {gpu_id}] Worker logging to: {_log_path}")
+
     from dreamverse.video_generation import VideoGenerationWorker
 
     worker = VideoGenerationWorker(gpu_id)
@@ -970,16 +1040,27 @@ def get_available_gpus() -> list[int]:
         visible_gpu_ids = [int(x.strip()) for x in cuda_visible.split(",") if x.strip()]
         return _limit_gpu_ids(visible_gpu_ids)
 
-    # Auto-detect available GPUs
+    # Auto-detect available GPUs.
+    #
+    # Previously this called `subprocess.run(["nvidia-smi", ...], capture_output=True)`,
+    # which spawned two stdlib `_readerthread`s to drain the child's stdout / stderr
+    # pipes. On Windows + py3.12, those reader threads sometimes race with their pipe
+    # being closed (Popen cleanup vs reader thread mid-`fh.read()`), surfacing as two
+    # `ValueError: I/O operation on closed file.` tracebacks at dreamverse boot. The
+    # subprocess.run itself still returned the right answer, but the noise drowned
+    # out the real worker output and looked like a startup failure.
+    #
+    # torch.cuda.device_count() gives the exact same GPU count via the CUDA driver,
+    # no subprocess, no pipes, no reader threads. (We deliberately don't import torch
+    # at module top -- it pulls in fastvideo's whole stack -- so do it lazily here.)
     try:
-        result = subprocess.run(["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
-                                capture_output=True,
-                                text=True)
-        if result.returncode == 0:
-            detected_gpu_ids = [int(x.strip()) for x in result.stdout.strip().split("\n") if x.strip()]
-            print(f"Auto-detected GPU IDs: {detected_gpu_ids}")
+        import torch  # lazy
+        n = torch.cuda.device_count()
+        if n > 0:
+            detected_gpu_ids = list(range(n))
+            print(f"Auto-detected GPU IDs (via torch.cuda): {detected_gpu_ids}")
             return _limit_gpu_ids(detected_gpu_ids)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[get_available_gpus] torch.cuda probe failed ({e}); falling back to [0]")
 
     return _limit_gpu_ids([0])

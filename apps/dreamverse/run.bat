@@ -15,6 +15,11 @@
 ::   FRONTEND_MODE=single5s run.bat
 ::   CEREBRAS_API_KEY=...                 (LLM features off without these)
 ::   GROQ_API_KEY=...
+::
+:: Default resolution: 544x960 @ 121 frames @ 24fps (~5 sec video). Lowered
+:: from upstream 1088x1920 to keep warmup under ~2.5 min on a 32 GB 5090
+:: bf16. Edit serve_configs/streaming_demo.yaml `default_request.sampling`
+:: to change. Per-request client overrides still take effect.
 
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"

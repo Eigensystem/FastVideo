@@ -104,8 +104,16 @@ server:
 default_request:
   sampling:
     num_frames: 121          # internal: config.py:36 NUM_FRAMES
-    height: 1088             # internal: config.py:37 FRAME_HEIGHT
-    width: 1920              # internal: config.py:38 FRAME_WIDTH
+    # Lowered from 1088x1920 to 544x960 (quarter pixel count -- matches the
+    # LTX2 refine stage1 size). On a 32 GB 5090 this cuts the boot-time
+    # warmup from ~5-10 min to ~1.5-2.5 min AND makes every subsequent
+    # request finish ~4x faster. Override per-request via the client API
+    # (the operator pin only sets the *default*, not a cap).
+    # No env-var override is wired through code today -- if you need to
+    # toggle, edit this file (or rebuild streaming_demo.yaml). See
+    # run.bat header for the resolution note.
+    height: 544              # was 1088 -- internal: config.py:37 FRAME_HEIGHT
+    width: 960               # was 1920 -- internal: config.py:38 FRAME_WIDTH
     num_inference_steps: 5   # internal: config.py:39 NUM_INFERENCE_STEPS
     fps: 24                  # internal: gpu_pool.py:85 TARGET_FPS
 

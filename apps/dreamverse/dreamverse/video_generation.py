@@ -257,13 +257,28 @@ class VideoGenerationWorker:
         config_model_path = (self.current_model_config.get("config_model_path")
                              or self.current_model_config["model_path"])
 
-        enable_compile = os.getenv("ENABLE_TORCH_COMPILE", "1") == "1"
+        # Windows auto-disable for known-broken features. Both can be force-
+        # enabled by explicitly setting the env var to "1" / "0".
+        #   torch.compile  — inductor on Windows + sm_120 (Blackwell) trips
+        #     on flash-attn / triton-windows lowering and the worker dies
+        #     during the first compile-pass at worker.initialize().
+        #   NVFP4         — quantizer needs flashinfer (no Windows wheel).
+        # On Linux both default to enabled as before; on Windows both
+        # default to disabled so the worker can come up. bf16 path is
+        # slower + higher VRAM, but it works.
+        import sys as _sys
+        _is_win = _sys.platform == "win32"
+        enable_compile = os.getenv("ENABLE_TORCH_COMPILE", "0" if _is_win else "1") == "1"
         # NVFP4 quantization needs flashinfer, which has no Windows wheels.
-        # Set DREAMVERSE_DISABLE_NVFP4=1 to load the model in bf16 instead —
-        # higher VRAM and slower, but works on hosts without flashinfer.
-        disable_nvfp4 = os.getenv("DREAMVERSE_DISABLE_NVFP4", "0") == "1"
+        # Set DREAMVERSE_DISABLE_NVFP4=0 on Windows to force NVFP4 anyway
+        # (requires you to have built flashinfer from source).
+        disable_nvfp4 = os.getenv("DREAMVERSE_DISABLE_NVFP4", "1" if _is_win else "0") == "1"
         quant_config = None if disable_nvfp4 else QuantizationConfig(transformer_quant="NVFP4")
         compile_mode = "max-autotune-no-cudagraphs" if DREAMVERSE_MAX_AUTOTUNE else None
+        if _is_win and not enable_compile:
+            print(f"[GPU {self.gpu_id}] Windows defaults: torch.compile=OFF, "
+                  f"NVFP4={'ON' if not disable_nvfp4 else 'OFF'}. "
+                  f"Override with ENABLE_TORCH_COMPILE=1 / DREAMVERSE_DISABLE_NVFP4=0.")
 
         components = ComponentConfig(
             config_root=config_model_path,

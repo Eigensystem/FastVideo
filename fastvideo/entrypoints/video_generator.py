@@ -897,6 +897,17 @@ class VideoGenerator:
                 logger.info("Saved image to %s", output_path)
             else:
                 assert frames is not None  # implied by save_to_disk and not audio_only
+                # Insurance: dump raw frames to .npz BEFORE any encoder attempt.
+                # Generation cost is minutes of GPU work; insurance is ~tens of
+                # MB compressed and lets the run be salvaged with a one-line
+                # ffmpeg re-encode if every encoder path below fails (PyAV,
+                # ffmpeg pipe, _save_mp4_direct). Best-effort: a failure here
+                # must not block the actual save.
+                try:
+                    npz_path = os.path.splitext(str(output_path))[0] + ".frames.npz"
+                    np.savez_compressed(npz_path, frames=np.asarray(frames), fps=batch.fps)
+                except Exception as exc:
+                    logger.warning("Failed to write frame-insurance npz next to %s: %s", output_path, exc)
                 audio = output_batch.extra.get("audio")
                 audio_sample_rate = output_batch.extra.get("audio_sample_rate")
                 if audio is not None and audio_sample_rate is not None:

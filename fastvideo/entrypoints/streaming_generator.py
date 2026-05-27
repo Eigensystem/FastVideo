@@ -9,7 +9,7 @@ import torchvision
 from einops import rearrange
 
 from fastvideo.api.sampling_param import SamplingParam
-from fastvideo.entrypoints.video_generator import VideoGenerator
+from fastvideo.entrypoints.video_generator import VideoGenerator, _save_mp4_direct
 from fastvideo.fastvideo_args import FastVideoArgs
 from fastvideo.logger import init_logger
 from fastvideo.pipelines import ForwardBatch
@@ -57,7 +57,10 @@ class IncrementalVideoWriter:
             self._writer.append_data(frame)
 
     def _write_block(self, frames: list[np.ndarray], path: str) -> str:
-        imageio.mimsave(path, frames, fps=self._fps)
+        # _save_mp4_direct skips imageio_ffmpeg's `ffmpeg -encoders` probe, which
+        # is what blows up under Windows handle pressure with the cryptic
+        # "cannot join thread before it is started" trace.
+        _save_mp4_direct(frames, path, self._fps)
         return path
 
     def close(self) -> None:
@@ -237,7 +240,15 @@ class StreamingVideoGenerator(VideoGenerator):
             self.writer = None
             logger.info("Saved video to %s", output_path)
         else:
-            imageio.mimsave(output_path, self.accumulated_frames, fps=fps, format="mp4")
+            # Insurance: dump raw frames to .npz BEFORE the mp4 encode so an
+            # encoder crash doesn't waste the run. ~tens of MB compressed for
+            # a typical clip; re-encode with ffmpeg offline if mp4 ever fails.
+            try:
+                npz_path = os.path.splitext(output_path)[0] + ".frames.npz"
+                np.savez_compressed(npz_path, frames=np.asarray(self.accumulated_frames), fps=fps)
+            except Exception as exc:
+                logger.warning("Failed to write frame-insurance npz next to %s: %s", output_path, exc)
+            _save_mp4_direct(self.accumulated_frames, output_path, fps)
             logger.info("Saved video to %s", output_path)
 
         if self._use_queue_mode and self.executor._streaming_enabled:

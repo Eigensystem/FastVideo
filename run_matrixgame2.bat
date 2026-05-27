@@ -51,6 +51,16 @@ set "HF_DEACTIVATE_ASYNC_LOAD=1"
 :: diffusion-checkpoint mmap for Windows virtual address space. Off.
 set "HF_HUB_ENABLE_HF_TRANSFER=0"
 
+:: HF Hub on Python 3.12 + Windows: `snapshot_download` spawns a ThreadPoolExecutor
+:: for parallel file downloads. If the resolution step fails (or even when the
+:: model is fully cached), Python's atexit handler tries to `t.join()` a thread
+:: that was never started -> RuntimeError("cannot join thread before it is
+:: started") that masks the real underlying error. Forcing OFFLINE mode skips
+:: the network step entirely; the loader reads straight from the cache.
+:: Pre-req: the model must already be downloaded (run download_models.bat once
+:: with HF_HUB_OFFLINE *unset* on a working machine, or on Linux/WSL2).
+if not defined HF_HUB_OFFLINE set "HF_HUB_OFFLINE=1"
+
 :: torch.distributed on Windows: PyTorch wheels are built without libuv, but
 :: TCPStore defaults to use_libuv=1. Disable both var names so the override
 :: is version-agnostic.
@@ -66,6 +76,7 @@ set "GUI_PORT=7860"
 :parse
 if "%~1"=="" goto args_done
 if /I "%~1"=="--variant"   ( set "VARIANT=%~2" & shift & shift & goto parse )
+if /I "%~1"=="--basic"     ( set "MODE=basic" & shift & goto parse )
 if /I "%~1"=="--streaming" ( set "MODE=streaming" & shift & goto parse )
 if /I "%~1"=="--gui"       ( set "MODE=gui" & shift & goto parse )
 if /I "%~1"=="--port"      ( set "GUI_PORT=%~2" & shift & shift & goto parse )

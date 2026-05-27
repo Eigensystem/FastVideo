@@ -566,10 +566,35 @@ def maybe_download_model(model_name_or_path: str, local_dir: str | None = None, 
             return str(local_path)
 
         logger.info("Downloading model snapshot from HF Hub for %s...", model_name_or_path)
+        # Windows + mp.spawn'd worker subprocess + py3.12: huggingface_hub's
+        # default parallel snapshot_download spawns a ThreadPoolExecutor
+        # whose shutdown logic races and raises `RuntimeError: cannot join
+        # thread before it is started`, even when all files are already
+        # cached. Two-stage strategy:
+        #   1. Try local_files_only=True first -- skips the threaded probe
+        #      entirely. Returns instantly if the cache is complete.
+        #   2. Fall back to a max_workers=1 fetch (serial; no thread pool)
+        #      if the cache is incomplete and a real download is needed.
+        import sys as _sys
+        _is_win = _sys.platform == "win32"
         with get_lock(model_name_or_path):
-            local_path = snapshot_download(repo_id=model_name_or_path,
-                                           ignore_patterns=["*.onnx", "*.msgpack"],
-                                           local_dir=local_dir)
+            local_path = None
+            if _is_win:
+                try:
+                    local_path = snapshot_download(repo_id=model_name_or_path,
+                                                   ignore_patterns=["*.onnx", "*.msgpack"],
+                                                   local_dir=local_dir,
+                                                   local_files_only=True)
+                    logger.info("Cache hit for %s -- skipping threaded download.",
+                                model_name_or_path)
+                except Exception as cache_miss:
+                    logger.info("Cache miss for %s (%s); falling back to "
+                                "serial download.", model_name_or_path, cache_miss)
+            if local_path is None:
+                local_path = snapshot_download(repo_id=model_name_or_path,
+                                               ignore_patterns=["*.onnx", "*.msgpack"],
+                                               local_dir=local_dir,
+                                               max_workers=1 if _is_win else 8)
         logger.info("Downloaded model to %s", local_path)
         return str(local_path)
     except Exception as e:

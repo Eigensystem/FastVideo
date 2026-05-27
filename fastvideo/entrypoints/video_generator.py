@@ -99,6 +99,68 @@ _FROM_PRETRAINED_CONVENIENCE_KWARGS = frozenset({
 })
 
 
+def _save_mp4_direct(frames, output_path: str, fps: float) -> None:
+    """Write `frames` to `output_path` via a direct ffmpeg subprocess.
+
+    Replaces `imageio.mimsave(..., format="mp4")` for the no-audio save path.
+
+    Why: imageio.mimsave routes through imageio_ffmpeg.write_frames, which
+    calls get_first_available_h264_encoder() to probe `ffmpeg -encoders`
+    via subprocess.run(capture_output=True). That probe spawns stdout/stderr
+    reader threads, and on a Windows host that is handle-starved (a sibling
+    process leaking 16M+ handles, say a hung gradio worker) the thread
+    allocation silently fails. The resulting traceback bubbles up as
+        RuntimeError: cannot join thread before it is started
+    -- *after* a full video has been generated, wasting the run.
+
+    Direct path: `Popen(stdin=PIPE)` with stdout/stderr *not* captured needs
+    zero extra threads, so it survives handle pressure. We also force the
+    codec explicitly (`-c:v libx264 -pix_fmt yuv420p`) to skip the probe.
+
+    Frames may be 8-bit RGB or RGBA numpy arrays; alpha is dropped if present.
+    """
+    import imageio_ffmpeg  # local import: only paid when this path is taken
+
+    arr = np.asarray(frames[0])
+    if arr.ndim != 3:
+        raise ValueError(f"frames[0] must be HxWxC; got shape {arr.shape}")
+    h, w, c = arr.shape
+    if c not in (3, 4):
+        raise ValueError(f"frames[0] last dim must be 3 (RGB) or 4 (RGBA); got {c}")
+
+    cmd = [
+        imageio_ffmpeg.get_ffmpeg_exe(),
+        "-y",
+        "-loglevel", "warning",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{w}x{h}",
+        "-pix_fmt", "rgb24",
+        "-r", f"{fps}",
+        "-i", "-",
+        "-an",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-crf", "18",
+        output_path,
+    ]
+    # Note: no stdout/stderr capture. ffmpeg's progress lines go to the
+    # parent's stderr; that's fine and visible to the user.
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    try:
+        for f in frames:
+            arr = np.asarray(f, dtype=np.uint8)
+            if arr.shape[-1] == 4:
+                arr = arr[..., :3]
+            proc.stdin.write(np.ascontiguousarray(arr).tobytes())
+    finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg exited with code {proc.returncode} while writing {output_path}")
+
+
 def _infer_latent_batch_size(batch: ForwardBatch) -> int:
     if isinstance(batch.prompt, list):
         latent_batch_size = len(batch.prompt)
@@ -864,7 +926,7 @@ class VideoGenerator:
                     else:
                         logger.warning("Single-pass save failed; falling back to two-step save/mux.")
                         save_start = time.perf_counter()
-                        imageio.mimsave(output_path, frames, fps=batch.fps, format="mp4")
+                        _save_mp4_direct(frames, output_path, batch.fps)
                         save_video_time = time.perf_counter() - save_start
                         mux_start = time.perf_counter()
                         mux_ok = self._mux_audio(output_path, audio, int(audio_sample_rate))
@@ -873,7 +935,7 @@ class VideoGenerator:
                             logger.warning("Audio mux failed; saved video without audio.")
                 else:
                     save_start = time.perf_counter()
-                    imageio.mimsave(output_path, frames, fps=batch.fps, format="mp4")
+                    _save_mp4_direct(frames, output_path, batch.fps)
                     save_video_time = time.perf_counter() - save_start
                     audio_mux_time = 0.0
                 logger.info("Saved video to %s", output_path)

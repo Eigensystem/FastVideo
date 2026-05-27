@@ -161,11 +161,20 @@ class GroupCoordinator:
         self.device_group = None
         self.cpu_group = None
 
+        # On Windows at world_size=1, both the device-side and CPU-side
+        # sub-groups must avoid gloo for the same reason described in
+        # init_distributed_environment() above: gloo's device factory is
+        # broken on Windows. The "fake" backend gives correct no-op
+        # semantics at world_size=1 and skips device construction.
+        _world_size = torch.distributed.get_world_size()
+        _is_win_single = sys.platform == "win32" and _world_size == 1
+        _cpu_group_backend = "fake" if _is_win_single else "gloo"
+        _device_group_backend = "fake" if _is_win_single else torch_distributed_backend
         for ranks in group_ranks:
-            device_group = torch.distributed.new_group(ranks, backend=torch_distributed_backend)
+            device_group = torch.distributed.new_group(ranks, backend=_device_group_backend)
             # a group with `gloo` backend, to allow direct coordination between
-            # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            # processes through the CPU (downgraded to `fake` on win+world=1).
+            cpu_group = torch.distributed.new_group(ranks, backend=_cpu_group_backend)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -734,10 +743,29 @@ def init_distributed_environment(
     if current_platform.is_cuda_alike():
         # NCCL is Linux-only. PyTorch's Windows CUDA wheels ship without NCCL,
         # so init_process_group(backend='nccl') raises "Distributed package
-        # doesn't have NCCL built in" on Windows even at world_size=1. Fall
-        # back to gloo, which supports CUDA tensors on Windows (with a small
-        # collective-perf penalty that's irrelevant at sp_size/tp_size=1).
-        if sys.platform == "win32":
+        # doesn't have NCCL built in" on Windows even at world_size=1.
+        #
+        # gloo is the documented Windows fallback, BUT gloo's device factory
+        # is fundamentally broken on Windows: makeDeviceForInterface uses
+        # Linux-only ioctls (so GLOO_SOCKET_IFNAME crashes with
+        # "unsupported gloo device"), and makeDeviceForHostname requires
+        # gethostbyname(gethostname()) to return a TCP-bindable IP, which
+        # frequently fails behind VPN / virtual / Hyper-V adapters (the
+        # 10.191.23.192 NVIDIA VPN address on this machine, for example,
+        # binds-but-doesn't-listen).
+        #
+        # At world_size=1 every collective is a mathematical no-op, so we
+        # use torch's "fake" backend instead. It registers a usable
+        # ProcessGroup (is_initialized() / get_rank() / get_world_size()
+        # all work) but skips all device construction, sidestepping the
+        # Windows gloo crash entirely. Multi-GPU Windows still needs gloo
+        # and won't be unblocked by this change.
+        if sys.platform == "win32" and world_size == 1:
+            backend = "fake"
+            logger.info("Using fake backend for CUDA on Windows at world_size=1 "
+                        "(gloo's device factory is unusable on Windows; collectives "
+                        "are no-ops at world_size=1 so the fake backend is correct).")
+        elif sys.platform == "win32":
             backend = "gloo"
             logger.info("Using gloo backend for CUDA on Windows (NCCL unavailable)")
         else:

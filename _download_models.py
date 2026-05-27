@@ -40,10 +40,9 @@ REGISTRY: dict[str, tuple[list[str], str, str]] = {
                 ], "game-streaming-poc (legacy non-distilled, all 3 variants)", ""),
     # Distilled Matrix-Game-2.0 variants — what basic_matrixgame2.py and
     # fastvideo/registry.py expect by default. Pick only the variant you
-    # need; no reason to download all three unless you're switching between
-    # them at runtime.
+    # need; no reason to download both unless you're switching between
+    # them at runtime. (GTA variant intentionally omitted — not used.)
     "mg-base":   (["FastVideo/Matrix-Game-2.0-Base-Distilled-Diffusers"],      "basic_matrixgame2.py (universal/WASD)", ""),
-    "mg-gta":    (["FastVideo/Matrix-Game-2.0-GTA-Distilled-Diffusers"],       "basic_matrixgame2.py (gta_drive)",      ""),
     "mg-temple": (["FastVideo/Matrix-Game-2.0-TempleRun-Distilled-Diffusers"], "basic_matrixgame2.py (templerun)",      ""),
     "wan22":   (["Wan-AI/Wan2.2-TI2V-5B-Diffusers"],            "HY-WorldPlay WAN pipeline", ""),
     # NOTE: MMAudio (hkchengrex/MMAudio) is intentionally NOT in this

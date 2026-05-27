@@ -1,13 +1,20 @@
 @echo off
 :: One-time setup for the local FastVideo checkout.
 ::
-:: Reuses MIND's venv (torch + CUDA already installed) and pip-installs this
-:: repo in editable mode so consumers (e.g. game-streaming-poc) get the
-:: fastvideo.entrypoints.streaming_generator and matrixgame.utils modules
-:: that the public PyPI 'fastvideo' wheel does NOT ship.
+:: Default target: this repo's own .venv (FastVideo\.venv\). Pip-installs
+:: FastVideo in editable mode so consumers (e.g. dreamverse, game-streaming-poc,
+:: matrixgame2 examples) get fastvideo.entrypoints.streaming_generator and
+:: fastvideo.models.dits.matrixgame2.utils — modules the public PyPI
+:: 'fastvideo' wheel does NOT ship.
 ::
-:: Override the target venv with an env var if MIND's is not the one to use:
-::   set FV_VENV_PY=C:\path\to\python.exe
+:: The default venv must already have torch + CUDA installed (uv venv +
+:: uv pip install torch==2.10.0+cu128). The torch pin in pyproject.toml
+:: (torch>=2.10,<2.12) is wide enough that the editable install won't
+:: trigger an upgrade.
+::
+:: Override the target venv with an env var (e.g. share fastvideo with
+:: MIND's venv instead of installing here):
+::   set FV_VENV_PY=C:\workspace\world\MIND\.venv\Scripts\python.exe
 ::   setup.bat
 
 setlocal enableextensions enabledelayedexpansion
@@ -20,10 +27,17 @@ set VIRTUAL_ENV=
 set PYTHONHOME=
 set PYTHONPATH=
 
-if not defined FV_VENV_PY set FV_VENV_PY=C:\workspace\world\MIND\.venv\Scripts\python.exe
+if not defined FV_VENV_PY set FV_VENV_PY=%~dp0.venv\Scripts\python.exe
 if not exist "!FV_VENV_PY!" (
     echo ERROR: python not found at !FV_VENV_PY!
-    echo Set FV_VENV_PY to a venv that already has torch + CUDA installed.
+    echo.
+    echo Default expects FastVideo's own venv. Create it with:
+    echo   uv venv --python 3.11 "%~dp0.venv"
+    echo   uv pip install --python "%~dp0.venv\Scripts\python.exe" ^^
+    echo     --index-url https://download.pytorch.org/whl/cu128 ^^
+    echo     torch==2.10.0 torchvision
+    echo.
+    echo Or override FV_VENV_PY to point at an existing venv with torch + CUDA.
     exit /b 2
 )
 

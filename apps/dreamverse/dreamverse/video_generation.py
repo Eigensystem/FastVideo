@@ -25,6 +25,7 @@ from dreamverse.config import (
     MODEL_CONFIG,
     NUM_FRAMES,
     NUM_INFERENCE_STEPS,
+    DREAMVERSE_MAX_AUTOTUNE,
 )
 
 # Multi-frame decoded continuation defaults from
@@ -262,6 +263,7 @@ class VideoGenerationWorker:
         # higher VRAM and slower, but works on hosts without flashinfer.
         disable_nvfp4 = os.getenv("DREAMVERSE_DISABLE_NVFP4", "0") == "1"
         quant_config = None if disable_nvfp4 else QuantizationConfig(transformer_quant="NVFP4")
+        compile_mode = "max-autotune-no-cudagraphs" if DREAMVERSE_MAX_AUTOTUNE else None
 
         components = ComponentConfig(
             config_root=config_model_path,
@@ -285,9 +287,10 @@ class VideoGenerationWorker:
                 compile=CompileConfig(
                     enabled=enable_compile,
                     text_encoder_enabled=enable_compile,
+                    vae_enabled=enable_compile,
                     backend="inductor",
                     fullgraph=True,
-                    mode="max-autotune-no-cudagraphs",
+                    mode=compile_mode,
                     dynamic=False,
                 ),
                 use_fsdp_inference=False,
